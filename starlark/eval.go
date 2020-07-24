@@ -13,9 +13,11 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
+	"unsafe"
 
 	"go.starlark.net/internal/compile"
 	"go.starlark.net/internal/spell"
@@ -46,12 +48,41 @@ type Thread struct {
 	// See example_test.go for some example implementations of Load.
 	Load func(thread *Thread, module string) (StringDict, error)
 
+	// Steps is a count of abstract computation steps executed by
+	// this thread. It is incremented by the interpreter. If after
+	// being incremented, its value is zero, the interpreter calls
+	// thread.Cancel("too many steps").
+	//
+	// Steps may be used as a measure the approximate cost of
+	// Starlark execution, by computing the difference in its value
+	// before and after a computation. It may also be used to limit
+	// a computation to k steps by setting its initial value to
+	// 1<<64 - k.
+	Steps uint64
+
+	// cancelReason records the reason from the first call to Cancel.
+	cancelReason *string
+
 	// locals holds arbitrary "thread-local" Go values belonging to the client.
 	// They are accessible to the client but not to any Starlark program.
 	locals map[string]interface{}
 
 	// proftime holds the accumulated execution time since the last profile event.
 	proftime time.Duration
+}
+
+// Cancel causes execution of Starlark code in the specified thread to
+// promptly fail with an EvalError that includes the specified reason.
+// There may be a delay before the interpreter observes the cancellation
+// if the thread is currently in a call to a built-in function.
+//
+// Cancellation cannot be undone.
+//
+// Unlike most methods of Thread, it is safe to call Cancel from any
+// goroutine, even if the thread is actively executing.
+func (thread *Thread) Cancel(reason string) {
+	// Atomically set cancelReason, preserving earlier reason if any.
+	atomic.CompareAndSwapPointer((*unsafe.Pointer)(unsafe.Pointer(&thread.cancelReason)), nil, unsafe.Pointer(&reason))
 }
 
 // SetLocal sets the thread-local value associated with the specified key.
